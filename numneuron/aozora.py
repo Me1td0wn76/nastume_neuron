@@ -14,6 +14,7 @@ _FOOTER = re.compile(r"^底本：", re.MULTILINE)
 _HEADING_LINE = re.compile(r"^.*［＃「[^」]*」は[大中小]?見出し］.*$", re.MULTILINE)
 _RUBY = re.compile(r"《[^》]*》")
 _NOTE = re.compile(r"※?［＃[^］]*］")
+_CHAPTER_NUMBER = re.compile(r"^[（(]?[一二三四五六七八九十百〇0-9０-９]+[）)]?$")
 
 
 def clean_aozora(raw: str) -> str:
@@ -36,6 +37,6 @@ def clean_aozora(raw: str) -> str:
     text = _NOTE.sub("", text)
     text = text.replace("※", "")
 
-    # 段落頭の全角スペースを取り、空行をなくす（1行 = 1段落 になる）
+    # 段落頭の全角スペースを取り、空行と章番号だけの行をなくす（1行 = 1段落 になる）
     lines = (line.strip(" 　\t") for line in text.split("\n"))
-    return "\n".join(line for line in lines if line)
+    return "\n".join(line for line in lines if line and not _CHAPTER_NUMBER.match(line))
