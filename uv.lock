@@ -25,7 +25,7 @@ wheels = [
 ]
 
 [[package]]
-name = "numneuron"
+name = "nastume-neuron"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 RAW_DIR = ROOT / "data" / "raw"
 CATALOG_PATH = ROOT / "data" / "aozora_catalog.zip"
 CATALOG_URL = "https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip"
-USER_AGENT = "numneuron/0.1 (personal study project)"
+USER_AGENT = "nastume_neuron/0.1 (personal study project)"
 
 
 def fetch(url: str) -> bytes:

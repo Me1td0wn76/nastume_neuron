@@ -1,5 +1,5 @@
 [project]
-name = "numneuron"
+name = "nastume_neuron"
 version = "0.1.0"
 description = "NumPyだけで作る小さな文豪風テキスト生成AI（文字単位GPT）"
 readme = "README.md"
