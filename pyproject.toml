@@ -1,0 +1,14 @@
+[project]
+name = "numneuron"
+version = "0.1.0"
+description = "NumPyだけで作る小さな文豪風テキスト生成AI（文字単位GPT）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
