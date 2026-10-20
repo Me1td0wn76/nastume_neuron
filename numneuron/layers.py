@@ -6,11 +6,16 @@
             同時に、自分のパラメータの勾配を Parameter.grad に足し込む。
 
 PyTorch などの自動微分（autograd）が裏でやっていることを、手で書いている。
+
+np.tanh などの関数は、xp = array_module(x) で選んだ xp.tanh として呼ぶ。
+x が GPU 上の配列なら xp は CuPy になり、計算が GPU で行われる（backend.py を参照）。
 """
 
 import math
 
 import numpy as np
+
+from .backend import array_module, to_device
 
 
 class Parameter:
@@ -18,7 +23,7 @@ class Parameter:
 
     def __init__(self, data: np.ndarray):
         self.data = data
-        self.grad = np.zeros_like(data)
+        self.grad = array_module(data).zeros_like(data)
 
 
 class Module:
@@ -42,6 +47,13 @@ class Module:
     def zero_grad(self):
         for p in self.parameters().values():
             p.grad[...] = 0
+
+    def to(self, device: str):
+        """全パラメータを CPU（"cpu"）か GPU（"gpu"）に移す。自分自身を返す。"""
+        for p in self.parameters().values():
+            p.data = to_device(p.data, device)
+            p.grad = to_device(p.grad, device)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +95,7 @@ class Embedding(Module):
 
     def backward(self, dout):
         # 同じ文字が何度も出てくるので、勾配はその行に「足し込む」
-        np.add.at(self.W.grad, self.idx.ravel(), dout.reshape(-1, dout.shape[-1]))
+        array_module(dout).add.at(self.W.grad, self.idx.ravel(), dout.reshape(-1, dout.shape[-1]))
 
 
 class LayerNorm(Module):
@@ -95,9 +107,10 @@ class LayerNorm(Module):
         self.eps = eps
 
     def forward(self, x):
+        xp = array_module(x)
         mu = x.mean(axis=-1, keepdims=True)
         var = x.var(axis=-1, keepdims=True)
-        rstd = 1.0 / np.sqrt(var + self.eps)
+        rstd = 1.0 / xp.sqrt(var + self.eps)
         xhat = (x - mu) * rstd
         self.xhat, self.rstd = xhat, rstd
         return xhat * self.gamma.data + self.beta.data
@@ -123,7 +136,7 @@ class GELU(Module):
     """活性化関数 GELU（GPT で使われる tanh 近似版）。ReLU を滑らかにしたような形。"""
 
     def forward(self, x):
-        t = np.tanh(_GELU_K * (x + 0.044715 * x * x * x))
+        t = array_module(x).tanh(_GELU_K * (x + 0.044715 * x * x * x))
         self.x, self.t = x, t
         return 0.5 * x * (1.0 + t)
 
@@ -135,7 +148,7 @@ class GELU(Module):
 
 def softmax(x, axis=-1):
     """最大値を引いてから exp を取ると、オーバーフローしない。"""
-    e = np.exp(x - x.max(axis=axis, keepdims=True))
+    e = array_module(x).exp(x - x.max(axis=axis, keepdims=True))
     return e / e.sum(axis=axis, keepdims=True)
 
 
@@ -158,18 +171,19 @@ class CausalSelfAttention(Module):
         self.proj = Linear(n_embd, n_embd, rng, std=0.02 / math.sqrt(2 * n_layer), dtype=dtype)
 
     def forward(self, x):
+        xp = array_module(x)
         B, T, C = x.shape
         H = self.n_head
         D = C // H
 
         # Query（何を探すか）, Key（自分は何か）, Value（中身）を一度に作り、ヘッドごとに分ける
         qkv = self.qkv.forward(x).reshape(B, T, 3, H, D).transpose(2, 0, 3, 1, 4)
-        q, k, v = (np.ascontiguousarray(a) for a in qkv)  # それぞれ (B, H, T, D)
+        q, k, v = (xp.ascontiguousarray(a) for a in qkv)  # それぞれ (B, H, T, D)
 
         scale = 1.0 / math.sqrt(D)
         score = (q @ k.swapaxes(-1, -2)) * scale  # (B, H, T, T): 各文字ペアの関連度
-        mask = np.tril(np.ones((T, T), dtype=bool))  # 自分より後ろ（未来）の文字は見せない
-        score = np.where(mask, score, -np.inf)
+        mask = xp.tril(xp.ones((T, T), dtype=bool))  # 自分より後ろ（未来）の文字は見せない
+        score = xp.where(mask, score, -xp.inf)
         att = softmax(score)  # 各行が「注目の割合」になる（合計 1）
         y = att @ v  # 注目した文字の Value を混ぜ合わせる
 
@@ -190,7 +204,7 @@ class CausalSelfAttention(Module):
         dk = dscore.swapaxes(-1, -2) @ q
 
         # forward で行った reshape / transpose を逆向きにたどる
-        dqkv = np.stack([dq, dk, dv]).transpose(1, 3, 0, 2, 4).reshape(B, T, 3 * H * D)
+        dqkv = array_module(dq).stack([dq, dk, dv]).transpose(1, 3, 0, 2, 4).reshape(B, T, 3 * H * D)
         return self.qkv.backward(dqkv)
 
 
@@ -237,21 +251,23 @@ def cross_entropy(logits, targets):
     """交差エントロピー損失（次の文字の予測がどれだけ外れたか）と、logits に対する勾配を返す。
 
     logits: (B, T, V) 各位置で「次に来る文字」のスコア
-    targets: (B, T) 正解の次の文字ID
+    targets: (B, T) 正解の次の文字ID（CPU 上の配列でもよい。logits と同じ側に移して使う）
     """
+    xp = array_module(logits)
     B, T, V = logits.shape
     x = logits.reshape(-1, V)
-    t = targets.ravel()
+    t = xp.asarray(targets).ravel()
     n = t.size
+    rows = xp.arange(n)
 
     # log softmax を安定に計算: log p = x - logsumexp(x)
     m = x.max(axis=1, keepdims=True)
-    lse = m + np.log(np.exp(x - m).sum(axis=1, keepdims=True))
+    lse = m + xp.log(xp.exp(x - m).sum(axis=1, keepdims=True))
     logp = x - lse
-    loss = -logp[np.arange(n), t].mean()
+    loss = -logp[rows, t].mean()
 
     # softmax + 交差エントロピーの勾配は (予測確率 - 正解の one-hot) / n というきれいな形になる
-    dx = np.exp(logp)
-    dx[np.arange(n), t] -= 1.0
+    dx = xp.exp(logp)
+    dx[rows, t] -= 1.0
     dx /= n
     return float(loss), dx.reshape(B, T, V)
