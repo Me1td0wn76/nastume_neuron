@@ -4,6 +4,7 @@
     uv run python train.py --preset tiny     # 動作確認用（数分）
     uv run python train.py                   # 標準設定（small）
     uv run python train.py --resume          # 中断した学習の続きから
+    uv run python train.py --device cpu      # GPU があっても CPU で学習する
 
 Ctrl+C で中断しても、その時点までの状態が保存されるので --resume で再開できる。
 """
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from numneuron.backend import DEVICES, device_name, resolve_device
 from numneuron.checkpoint import load_weights, save_config, save_weights
 from numneuron.layers import cross_entropy
 from numneuron.model import GPT, GPTConfig
@@ -90,6 +92,7 @@ def main():
     parser.add_argument("--preset", choices=PRESETS, default="small")
     parser.add_argument("--name", help="保存先 checkpoints/<name>（省略時はプリセット名）")
     parser.add_argument("--resume", action="store_true", help="保存済みの状態から学習を再開する")
+    parser.add_argument("--device", choices=DEVICES, default="auto", help="計算する装置（auto: GPU があれば GPU）")
     parser.add_argument("--n-layer", type=int)
     parser.add_argument("--n-head", type=int)
     parser.add_argument("--n-embd", type=int)
@@ -108,6 +111,7 @@ def main():
 
     ckpt_dir = ROOT / "checkpoints" / (args.name or args.preset)
     s = resolve_settings(args, ckpt_dir)
+    device = resolve_device(args.device)
 
     # --- データ ---
     meta = json.loads((DATA_DIR / "meta.json").read_text(encoding="utf-8"))
@@ -119,7 +123,8 @@ def main():
 
     # --- モデルと最適化手法 ---
     config = GPTConfig(vocab_size=len(tokenizer), n_styles=len(authors), **{k: s[k] for k in MODEL_KEYS})
-    model = GPT(config, seed=s["seed"])
+    # 重みを計算する装置に移す。GPU のとき、学習データ（文字ID）は model.forward の中でバッチごとに GPU へ送られる
+    model = GPT(config, seed=s["seed"]).to(device)
     params = model.parameters()
     optimizer = AdamW(params, weight_decay=s["weight_decay"])
     start_iter, best_val = 0, math.inf
@@ -134,6 +139,7 @@ def main():
         print(f"{start_iter} 回目から再開します")
     save_config(ckpt_dir, config, tokenizer, authors, train=s)
 
+    print(f"計算に使う装置: {device_name(device)}")
     print(f"作家: {', '.join(authors)}")
     print(f"パラメータ数: {model.num_params():,}  設定: {config}")
     print(f"1回の学習で {s['batch_size']} 本 × {s['block_size']} 文字を読み、{s['max_iters']} 回くり返します")
