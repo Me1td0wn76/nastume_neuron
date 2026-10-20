@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 
+from .backend import array_module
 from .layers import Parameter
 
 
@@ -12,6 +13,8 @@ class AdamW:
 
     Adam は「勾配の移動平均(m)」と「勾配の2乗の移動平均(v)」を使い、
     パラメータごとに歩幅を自動調整する。いまの深層学習でいちばん標準的な手法。
+
+    m, v はパラメータと同じ側（CPU か GPU）に作るので、model.to(device) のあとで作ること。
     """
 
     def __init__(self, params: dict[str, Parameter], betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1):
@@ -19,8 +22,8 @@ class AdamW:
         self.beta1, self.beta2 = betas
         self.eps = eps
         self.weight_decay = weight_decay
-        self.m = {k: np.zeros_like(p.data) for k, p in params.items()}
-        self.v = {k: np.zeros_like(p.data) for k, p in params.items()}
+        self.m = {k: array_module(p.data).zeros_like(p.data) for k, p in params.items()}
+        self.v = {k: array_module(p.data).zeros_like(p.data) for k, p in params.items()}
         self.t = 0
 
     def step(self, lr: float):
@@ -30,6 +33,7 @@ class AdamW:
         bias1 = 1 - b1**self.t
         bias2 = 1 - b2**self.t
         for k, p in self.params.items():
+            xp = array_module(p.data)
             g, m, v = p.grad, self.m[k], self.v[k]
             m *= b1
             m += (1 - b1) * g
@@ -38,7 +42,7 @@ class AdamW:
             # 重み減衰は行列（2次元以上）だけにかける。バイアスや LayerNorm にはかけない
             if p.data.ndim >= 2 and self.weight_decay:
                 p.data -= lr * self.weight_decay * p.data
-            p.data -= lr * (m / bias1) / (np.sqrt(v / bias2) + self.eps)
+            p.data -= lr * (m / bias1) / (xp.sqrt(v / bias2) + self.eps)
 
     def state_dict(self) -> dict[str, np.ndarray]:
         state = {"t": np.array(self.t)}
@@ -49,13 +53,15 @@ class AdamW:
     def load_state_dict(self, state):
         self.t = int(state["t"])
         for k in self.params:
-            self.m[k][...] = state[f"m/{k}"]
-            self.v[k][...] = state[f"v/{k}"]
+            xp = array_module(self.m[k])  # 読み込んだ値（CPU）を、GPU に載っていれば GPU に移す
+            self.m[k][...] = xp.asarray(state[f"m/{k}"])
+            self.v[k][...] = xp.asarray(state[f"v/{k}"])
 
 
 def clip_grad_norm(params: dict[str, Parameter], max_norm: float) -> float:
     """勾配全体の大きさ(ノルム)が max_norm を超えたら縮める。学習の暴走を防ぐ。"""
-    total = math.sqrt(sum(float((p.grad * p.grad).sum()) for p in params.values()))
+    # GPU だと float() で値を取り出すたびに計算の終わりを待つので、合計してから1回だけ取り出す
+    total = math.sqrt(float(sum((p.grad * p.grad).sum() for p in params.values())))
     if total > max_norm:
         scale = max_norm / (total + 1e-6)
         for p in params.values():
