@@ -6,6 +6,7 @@
     uv run python generate.py                               # 対話モード
     uv run python generate.py --prompt "吾輩は猫である。"     # 1回だけ生成
     uv run python generate.py --ckpt checkpoints/tiny        # 使うモデルを選ぶ
+    uv run python generate.py --device cpu                   # GPU があっても CPU で動かす
 """
 
 import argparse
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from numneuron.backend import DEVICES, resolve_device
 from numneuron.checkpoint import load_model
 
 ROOT = Path(__file__).resolve().parent
@@ -57,10 +59,11 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.8, help="小さいほど無難、大きいほど冒険的")
     parser.add_argument("--top-k", type=int, default=40, help="確率上位 k 文字の中から選ぶ")
     parser.add_argument("--seed", type=int, help="乱数の種（同じ値なら毎回同じ文章になる）")
+    parser.add_argument("--device", choices=DEVICES, default="auto", help="計算する装置（auto: GPU があれば GPU）")
     args = parser.parse_args()
 
     ckpt = args.ckpt or find_latest_checkpoint()
-    model, tokenizer, authors = load_model(ckpt)
+    model, tokenizer, authors = load_model(ckpt, resolve_device(args.device))
     rng = np.random.default_rng(args.seed)
     author = args.author or authors[0]
     if author not in authors:
