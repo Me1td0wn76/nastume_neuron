@@ -44,4 +44,4 @@ def load_model(ckpt_dir: Path, device: str = "cpu") -> tuple[GPT, CharTokenizer,
     meta = json.loads((ckpt_dir / "config.json").read_text(encoding="utf-8"))
     model = GPT(GPTConfig(**meta["model"]))
     load_weights(ckpt_dir / "model.npz", model)
-    return model.to(device), CharTokenizer(meta["itos"]), meta["authors"]
+    return model.to(device).eval(), CharTokenizer(meta["itos"]), meta["authors"]

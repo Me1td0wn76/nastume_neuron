@@ -47,6 +47,11 @@ def device_name(device: str) -> str:
     return "CPU"
 
 
+def get_xp(device: str):
+    """装置名（"cpu" か "gpu"）から、計算に使うライブラリ（numpy か cupy）を返す。"""
+    return cp if device == "gpu" else np
+
+
 def array_module(x):
     """配列 x が載っている側のライブラリ（numpy か cupy）を返す。"""
     if cp is None:

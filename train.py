@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from numneuron.backend import DEVICES, device_name, resolve_device
+from numneuron.backend import DEVICES, device_name, get_xp, resolve_device
 from numneuron.checkpoint import load_weights, save_config, save_weights
 from numneuron.layers import cross_entropy
 from numneuron.model import GPT, GPTConfig
@@ -29,11 +29,11 @@ DATA_DIR = ROOT / "data" / "processed"
 
 # モデルの大きさと学習の長さの組み合わせ
 PRESETS = {
-    "tiny": dict(n_layer=2, n_head=4, n_embd=64, block_size=64, batch_size=32, max_iters=600, lr=2e-3),
-    "small": dict(n_layer=4, n_head=4, n_embd=192, block_size=128, batch_size=32, max_iters=5000, lr=1e-3),
-    "medium": dict(n_layer=6, n_head=6, n_embd=288, block_size=192, batch_size=32, max_iters=8000, lr=6e-4),
+    "tiny": dict(n_layer=2, n_head=4, n_embd=64, block_size=64, dropout=0.0, batch_size=32, max_iters=600, lr=2e-3),
+    "small": dict(n_layer=4, n_head=4, n_embd=192, block_size=128, dropout=0.0, batch_size=32, max_iters=5000, lr=1e-3),
+    "medium": dict(n_layer=6, n_head=6, n_embd=288, block_size=192, dropout=0.0, batch_size=32, max_iters=8000, lr=6e-4),
 }
-MODEL_KEYS = ("n_layer", "n_head", "n_embd", "block_size")
+MODEL_KEYS = ("n_layer", "n_head", "n_embd", "block_size", "dropout")
 
 
 def get_batch(tokens, styles, block_size, batch_size, rng):
@@ -69,6 +69,7 @@ def sample_text(model, tokenizer, prompt, style, length=100):
 def resolve_settings(args, ckpt_dir: Path) -> dict:
     if args.resume:
         saved = json.loads((ckpt_dir / "config.json").read_text(encoding="utf-8"))["train"]
+        saved.setdefault("dropout", 0.0)  # Dropout を入れる前に作ったチェックポイント
         if args.max_iters is not None:
             saved["max_iters"] = args.max_iters
         return saved
@@ -97,6 +98,7 @@ def main():
     parser.add_argument("--n-head", type=int)
     parser.add_argument("--n-embd", type=int)
     parser.add_argument("--block-size", type=int)
+    parser.add_argument("--dropout", type=float, help="学習中に値を 0 にする割合（0 なら Dropout なし）")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--max-iters", type=int)
     parser.add_argument("--lr", type=float, help="学習率の最大値")
@@ -145,10 +147,12 @@ def main():
     print(f"1回の学習で {s['batch_size']} 本 × {s['block_size']} 文字を読み、{s['max_iters']} 回くり返します")
 
     rng = np.random.default_rng(s["seed"] + start_iter)
+    get_xp(device).random.seed(s["seed"] + start_iter)  # Dropout で 0 にする場所を選ぶ乱数
     sample_style = 0
 
     def evaluate_and_save(it):
         nonlocal best_val
+        model.eval()  # 評価と生成例では Dropout を止める
         val_loss = estimate_loss(model, val_tok, val_sty, s["block_size"], s["batch_size"], s["eval_batches"])
         mark = ""
         if val_loss < best_val:
@@ -162,6 +166,7 @@ def main():
         print(f"\n=== {it} 回目  検証用データの損失 {val_loss:.3f}（困惑度 {math.exp(val_loss):.1f}）{mark}")
         print("生成例: " + sample_text(model, tokenizer, s["sample_prompt"], sample_style).replace("\n", "⏎"))
         print()
+        model.train()
 
     it = start_iter
     smooth_loss = None

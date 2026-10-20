@@ -29,6 +29,8 @@ class Parameter:
 class Module:
     """層の基底クラス。持っている Parameter を名前付きで集められる。"""
 
+    training = True  # 学習中か（Dropout のように、学習中と生成中で動きが変わる層がある）
+
     def parameters(self) -> dict[str, Parameter]:
         params = {}
         for name, value in vars(self).items():
@@ -43,6 +45,24 @@ class Module:
                         for sub, p in m.parameters().items():
                             params[f"{name}.{i}.{sub}"] = p
         return params
+
+    def modules(self):
+        """自分と、中に含まれるすべての層を順に返す。"""
+        yield self
+        for value in vars(self).values():
+            for m in value if isinstance(value, list) else [value]:
+                if isinstance(m, Module):
+                    yield from m.modules()
+
+    def train(self, mode: bool = True):
+        """学習モードにする（mode=False なら評価・生成モード）。自分自身を返す。"""
+        for m in self.modules():
+            m.training = mode
+        return self
+
+    def eval(self):
+        """評価・生成モードにする（Dropout が何もしなくなる）。自分自身を返す。"""
+        return self.train(False)
 
     def zero_grad(self):
         for p in self.parameters().values():
@@ -146,6 +166,29 @@ class GELU(Module):
         return dout * (0.5 * (1.0 + t) + 0.5 * x * (1.0 - t * t) * dt)
 
 
+class Dropout(Module):
+    """学習中だけ、ランダムに割合 p の値を 0 にする（残りは 1/(1-p) 倍して平均を保つ）。
+
+    毎回ちがう一部が使えなくなるので、特定の値の組み合わせに頼った丸暗記（過学習）がしにくくなる。
+    評価・生成のときは何もしない。
+    """
+
+    def __init__(self, p: float):
+        self.p = p
+
+    def forward(self, x):
+        if not self.training or self.p == 0:
+            self.mask = None
+            return x
+        keep = array_module(x).random.rand(*x.shape) >= self.p
+        self.mask = keep.astype(x.dtype) / (1 - self.p)
+        return x * self.mask
+
+    def backward(self, dout):
+        # 0 にした値は出力に影響しないので、勾配も 0。残した値は同じ倍率で流す
+        return dout if self.mask is None else dout * self.mask
+
+
 def softmax(x, axis=-1):
     """最大値を引いてから exp を取ると、オーバーフローしない。"""
     e = array_module(x).exp(x - x.max(axis=axis, keepdims=True))
@@ -163,12 +206,13 @@ class CausalSelfAttention(Module):
     各文字が「それより前の文字のうち、どれに注目するか」を学習する。
     """
 
-    def __init__(self, n_embd, n_head, n_layer, rng, dtype=np.float32):
+    def __init__(self, n_embd, n_head, n_layer, rng, dropout=0.0, dtype=np.float32):
         assert n_embd % n_head == 0, "n_embd は n_head で割り切れる必要があります"
         self.n_head = n_head
         self.qkv = Linear(n_embd, 3 * n_embd, rng, dtype=dtype)
         # 残差接続に足し込む層は、層の数に応じて初期値を小さくする（GPT-2 の工夫）
         self.proj = Linear(n_embd, n_embd, rng, std=0.02 / math.sqrt(2 * n_layer), dtype=dtype)
+        self.drop = Dropout(dropout)
 
     def forward(self, x):
         xp = array_module(x)
@@ -189,13 +233,13 @@ class CausalSelfAttention(Module):
 
         self.q, self.k, self.v, self.att, self.scale = q, k, v, att, scale
         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)  # ヘッドを結合
-        return self.proj.forward(y)
+        return self.drop.forward(self.proj.forward(y))
 
     def backward(self, dout):
         q, k, v, att, scale = self.q, self.k, self.v, self.att, self.scale
         B, H, T, D = q.shape
 
-        dy = self.proj.backward(dout).reshape(B, T, H, D).transpose(0, 2, 1, 3)
+        dy = self.proj.backward(self.drop.backward(dout)).reshape(B, T, H, D).transpose(0, 2, 1, 3)
         datt = dy @ v.swapaxes(-1, -2)
         dv = att.swapaxes(-1, -2) @ dy
         # softmax の逆伝播（マスクされた位置は att=0 なので勾配も自動的に 0）
@@ -211,26 +255,27 @@ class CausalSelfAttention(Module):
 class MLP(Module):
     """各文字のベクトルを個別に変換する2層のニューラルネット（中間は4倍に広げる）。"""
 
-    def __init__(self, n_embd, n_layer, rng, dtype=np.float32):
+    def __init__(self, n_embd, n_layer, rng, dropout=0.0, dtype=np.float32):
         self.fc = Linear(n_embd, 4 * n_embd, rng, dtype=dtype)
         self.act = GELU()
         self.proj = Linear(4 * n_embd, n_embd, rng, std=0.02 / math.sqrt(2 * n_layer), dtype=dtype)
+        self.drop = Dropout(dropout)
 
     def forward(self, x):
-        return self.proj.forward(self.act.forward(self.fc.forward(x)))
+        return self.drop.forward(self.proj.forward(self.act.forward(self.fc.forward(x))))
 
     def backward(self, dout):
-        return self.fc.backward(self.act.backward(self.proj.backward(dout)))
+        return self.fc.backward(self.act.backward(self.proj.backward(self.drop.backward(dout))))
 
 
 class Block(Module):
     """Transformer ブロック = 注意機構 + MLP（それぞれ LayerNorm と残差接続つき）。"""
 
-    def __init__(self, n_embd, n_head, n_layer, rng, dtype=np.float32):
+    def __init__(self, n_embd, n_head, n_layer, rng, dropout=0.0, dtype=np.float32):
         self.ln1 = LayerNorm(n_embd, dtype=dtype)
-        self.attn = CausalSelfAttention(n_embd, n_head, n_layer, rng, dtype=dtype)
+        self.attn = CausalSelfAttention(n_embd, n_head, n_layer, rng, dropout=dropout, dtype=dtype)
         self.ln2 = LayerNorm(n_embd, dtype=dtype)
-        self.mlp = MLP(n_embd, n_layer, rng, dtype=dtype)
+        self.mlp = MLP(n_embd, n_layer, rng, dropout=dropout, dtype=dtype)
 
     def forward(self, x):
         h = x + self.attn.forward(self.ln1.forward(x))

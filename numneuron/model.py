@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .backend import array_module, to_numpy
-from .layers import Block, Embedding, LayerNorm, Module, softmax
+from .layers import Block, Dropout, Embedding, LayerNorm, Module, softmax
 
 
 @dataclass
@@ -23,6 +23,7 @@ class GPTConfig:
     n_layer: int = 4  # Transformer ブロックの数
     n_head: int = 4  # 注意機構のヘッド数
     n_embd: int = 192  # 文字ベクトルの次元数
+    dropout: float = 0.0  # 学習中に値を 0 にする割合（過学習を防ぐ）
 
 
 class GPT(Module):
@@ -34,7 +35,10 @@ class GPT(Module):
         self.pos_emb = Embedding(c.block_size, c.n_embd, rng, dtype=dtype)
         # 作家ごとのベクトル。全位置に足すことで「誰っぽく書くか」を指定できる
         self.style_emb = Embedding(c.n_styles, c.n_embd, rng, dtype=dtype)
-        self.blocks = [Block(c.n_embd, c.n_head, c.n_layer, rng, dtype=dtype) for _ in range(c.n_layer)]
+        self.drop = Dropout(c.dropout)
+        self.blocks = [
+            Block(c.n_embd, c.n_head, c.n_layer, rng, dropout=c.dropout, dtype=dtype) for _ in range(c.n_layer)
+        ]
         self.ln_f = LayerNorm(c.n_embd, dtype=dtype)
 
     def forward(self, idx, style, last_only=False):
@@ -52,6 +56,7 @@ class GPT(Module):
             + self.pos_emb.forward(xp.arange(T))[None, :, :]
             + self.style_emb.forward(style)[:, None, :]
         )
+        x = self.drop.forward(x)
         for block in self.blocks:
             x = block.forward(x)
         x = self.ln_f.forward(x)
@@ -77,6 +82,7 @@ class GPT(Module):
         dx = self.ln_f.backward(dx)
         for block in reversed(self.blocks):
             dx = block.backward(dx)
+        dx = self.drop.backward(dx)
 
         # 3つの埋め込みは足し算で合流していたので、同じ勾配がそれぞれに流れる
         self.tok_emb.backward(dx)

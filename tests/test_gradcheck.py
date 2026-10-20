@@ -7,8 +7,8 @@
 import numpy as np
 import pytest
 
-from numneuron.backend import gpu_available, to_numpy
-from numneuron.layers import cross_entropy
+from numneuron.backend import array_module, gpu_available, to_numpy
+from numneuron.layers import Dropout, cross_entropy
 from numneuron.model import GPT, GPTConfig
 
 # GPU（CuPy）が使える環境では、GPU でも同じ確認をする
@@ -17,6 +17,8 @@ DEVICES = ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(not gpu_available
 
 def compute_loss(model, idx, style, targets, backward=False):
     model.zero_grad()
+    # Dropout で 0 にする場所が毎回同じになるよう、乱数の種を固定する
+    array_module(model.tok_emb.W.data).random.seed(0)
     logits = model.forward(idx, style)
     loss, dlogits = cross_entropy(logits, targets)
     if backward:
@@ -24,9 +26,10 @@ def compute_loss(model, idx, style, targets, backward=False):
     return loss
 
 
+@pytest.mark.parametrize("dropout", [0.0, 0.3])
 @pytest.mark.parametrize("device", DEVICES)
-def test_gpt_gradients_match_numerical(device):
-    config = GPTConfig(vocab_size=13, n_styles=2, block_size=8, n_layer=2, n_head=2, n_embd=8)
+def test_gpt_gradients_match_numerical(device, dropout):
+    config = GPTConfig(vocab_size=13, n_styles=2, block_size=8, n_layer=2, n_head=2, n_embd=8, dropout=dropout)
     # 誤差を見分けやすいよう、勾配確認だけは倍精度(float64)で行う
     model = GPT(config, seed=0, dtype=np.float64)
     rng = np.random.default_rng(1)
@@ -79,3 +82,24 @@ def test_attention_does_not_look_ahead():
     b = model.forward(changed, style)
     np.testing.assert_allclose(a[:, :3], b[:, :3], rtol=1e-5)
     assert not np.allclose(a[:, 3:], b[:, 3:])
+
+
+def test_dropout_only_while_training():
+    x = np.ones((200, 100))
+    drop = Dropout(0.3)
+    y = drop.forward(x)
+    assert 0.25 < (y == 0).mean() < 0.35  # 約3割が 0 になる
+    assert np.isclose(y.mean(), 1.0, atol=0.05)  # 残りを大きくするので、平均はほぼ変わらない
+    np.testing.assert_array_equal(drop.backward(x), y)  # 0 にした場所には勾配も流さない
+
+    drop.eval()
+    np.testing.assert_array_equal(drop.forward(x), x)
+
+
+def test_eval_mode_turns_off_dropout():
+    # 評価・生成モードでは、Dropout ありのモデルも Dropout なしと同じ出力になる
+    idx, style = np.array([[1, 2, 3, 4]]), np.array([0])
+    plain = GPT(GPTConfig(vocab_size=20, block_size=8, n_layer=2, n_head=2, n_embd=16), seed=0)
+    dropped = GPT(GPTConfig(vocab_size=20, block_size=8, n_layer=2, n_head=2, n_embd=16, dropout=0.5), seed=0)
+    assert not np.allclose(dropped.forward(idx, style), plain.forward(idx, style))
+    np.testing.assert_allclose(dropped.eval().forward(idx, style), plain.forward(idx, style))
