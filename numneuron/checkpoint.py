@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .backend import array_module, to_numpy
 from .model import GPT, GPTConfig
 from .tokenizer import CharTokenizer
 
@@ -25,6 +26,7 @@ def save_config(ckpt_dir: Path, config: GPTConfig, tokenizer: CharTokenizer, aut
 def save_weights(path: Path, model: GPT, **extra_arrays):
     arrays = {f"param/{k}": p.data for k, p in model.parameters().items()}
     arrays.update(extra_arrays)
+    arrays = {k: to_numpy(a) for k, a in arrays.items()}  # GPU 上の配列は CPU に移してから保存する
     tmp = path.with_name(path.stem + ".tmp.npz")  # 書き込み途中で止まっても壊れないように
     np.savez(tmp, **arrays)
     tmp.replace(path)
@@ -34,12 +36,12 @@ def load_weights(path: Path, model: GPT) -> dict[str, np.ndarray]:
     """重みをモデルに読み込み、ファイル内の全配列を返す（最適化手法の状態などを取り出すため）。"""
     data = dict(np.load(path))
     for k, p in model.parameters().items():
-        p.data[...] = data[f"param/{k}"]
+        p.data[...] = array_module(p.data).asarray(data[f"param/{k}"])
     return data
 
 
-def load_model(ckpt_dir: Path) -> tuple[GPT, CharTokenizer, list[str]]:
+def load_model(ckpt_dir: Path, device: str = "cpu") -> tuple[GPT, CharTokenizer, list[str]]:
     meta = json.loads((ckpt_dir / "config.json").read_text(encoding="utf-8"))
     model = GPT(GPTConfig(**meta["model"]))
     load_weights(ckpt_dir / "model.npz", model)
-    return model, CharTokenizer(meta["itos"]), meta["authors"]
+    return model.to(device), CharTokenizer(meta["itos"]), meta["authors"]
