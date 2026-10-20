@@ -5,9 +5,14 @@
 """
 
 import numpy as np
+import pytest
 
+from numneuron.backend import gpu_available, to_numpy
 from numneuron.layers import cross_entropy
 from numneuron.model import GPT, GPTConfig
+
+# GPU（CuPy）が使える環境では、GPU でも同じ確認をする
+DEVICES = ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(not gpu_available(), reason="GPU が使えない"))]
 
 
 def compute_loss(model, idx, style, targets, backward=False):
@@ -19,7 +24,8 @@ def compute_loss(model, idx, style, targets, backward=False):
     return loss
 
 
-def test_gpt_gradients_match_numerical():
+@pytest.mark.parametrize("device", DEVICES)
+def test_gpt_gradients_match_numerical(device):
     config = GPTConfig(vocab_size=13, n_styles=2, block_size=8, n_layer=2, n_head=2, n_embd=8)
     # 誤差を見分けやすいよう、勾配確認だけは倍精度(float64)で行う
     model = GPT(config, seed=0, dtype=np.float64)
@@ -27,6 +33,7 @@ def test_gpt_gradients_match_numerical():
     # 初期値のままだと値が小さく差が出にくいので、重みを少し揺らしておく
     for p in model.parameters().values():
         p.data += rng.standard_normal(p.data.shape) * 0.3
+    model.to(device)
 
     idx = rng.integers(0, config.vocab_size, size=(3, 6))  # 文脈長より短い入力でも確認
     targets = rng.integers(0, config.vocab_size, size=(3, 6))
@@ -34,7 +41,7 @@ def test_gpt_gradients_match_numerical():
 
     compute_loss(model, idx, style, targets, backward=True)
     params = model.parameters()
-    analytic = {k: p.grad.copy() for k, p in params.items()}
+    analytic = {k: to_numpy(p.grad).copy() for k, p in params.items()}
 
     eps = 1e-6
     for name, p in params.items():
@@ -42,7 +49,7 @@ def test_gpt_gradients_match_numerical():
         picks = rng.choice(flat.size, size=min(12, flat.size), replace=False)
         numerical = []
         for i in picks:
-            original = flat[i]
+            original = float(flat[i])
             flat[i] = original + eps
             plus = compute_loss(model, idx, style, targets)
             flat[i] = original - eps
