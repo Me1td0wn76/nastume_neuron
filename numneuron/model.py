@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .backend import array_module, to_numpy
 from .layers import Block, Embedding, LayerNorm, Module, softmax
 
 
@@ -40,12 +41,15 @@ class GPT(Module):
         """idx: (B, T) 文字ID, style: (B,) 作家ID → logits: (B, T, V)
 
         last_only=True なら最後の位置の logits だけを (B, 1, V) で返す（生成時の高速化）。
+        idx と style は CPU 上の配列でもよい。重みが GPU にあれば、GPU に送ってから計算する。
         """
+        xp = array_module(self.tok_emb.W.data)
+        idx, style = xp.asarray(idx), xp.asarray(style)
         B, T = idx.shape
         assert T <= self.config.block_size, f"入力が長すぎます（{T} > {self.config.block_size}）"
         x = (
             self.tok_emb.forward(idx)
-            + self.pos_emb.forward(np.arange(T))[None, :, :]
+            + self.pos_emb.forward(xp.arange(T))[None, :, :]
             + self.style_emb.forward(style)[:, None, :]
         )
         for block in self.blocks:
@@ -99,7 +103,8 @@ class GPT(Module):
         style_arr = np.array([style])
         while True:
             context = np.array([idx[-self.config.block_size :]])
-            logits = self.forward(context, style_arr, last_only=True)[0, -1].astype(np.float64)
+            # 文字を選ぶ乱数は CPU（NumPy）で扱うので、スコアは CPU に持ってくる
+            logits = to_numpy(self.forward(context, style_arr, last_only=True)[0, -1]).astype(np.float64)
             if banned:
                 logits[banned] = -np.inf
             logits /= max(temperature, 1e-6)
