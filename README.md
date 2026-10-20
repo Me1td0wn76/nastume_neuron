@@ -5,6 +5,7 @@
 
 PyTorch などの深層学習フレームワークは使わず、**NumPy だけ**で
 GPT と同じ仕組み（Transformer）を実装しています。逆伝播（勾配の計算）も手書きです。
+NVIDIA の GPU があれば、同じコードを GPU でも動かせます（[GPU で動かす](#gpu-で動かす任意)）。
 
 ```
 あなた> 吾輩は猫である。名前はまだ無い。
@@ -38,6 +39,21 @@ uv sync
 > **必ず `uv run` で実行してください。** 
 > 行列計算ライブラリを使っており、`uv` が入れる NumPy より約40倍遅いです。
 
+### GPU で動かす（任意）
+
+NVIDIA の GPU があれば、[CuPy](https://cupy.dev/)（NumPy と同じ書き方で GPU を使って計算できるライブラリ）を入れると、
+学習と生成が GPU で動きます。small の学習が約1時間から約2分になります。
+
+```sh
+uv sync --extra gpu
+```
+
+- 入れたあとは、何もしなくても GPU が使われます。CPU で動かしたいときは `--device cpu` を付けます
+- CUDA の実行に必要なライブラリも一緒に入るので、CUDA Toolkit を別に入れる必要はありません。
+  ただし CUDA 13 に対応した NVIDIA のドライバが必要です（`nvidia-smi` で表示される「CUDA Version」が 13 以上なら OK）
+- このあと `uv sync` をやり直すときも `--extra gpu` を付けてください。付けないと CuPy が削除されます
+- 初回だけ、GPU 用の計算処理の準備（コンパイル）に数秒かかります。2回目からは保存されたものを使います
+
 ## 使い方（4ステップ）
 
 ### 1. 青空文庫からダウンロード
@@ -61,15 +77,17 @@ uv run python prepare.py
 ### 3. 学習
 
 ```sh
-uv run python train.py --preset tiny   # まず動作確認（約1分）
-uv run python train.py                 # 本番（small、約1時間）
+uv run python train.py --preset tiny   # まず動作確認
+uv run python train.py                 # 本番（small）
 ```
 
-| プリセット | パラメータ数 | 学習時間の目安（このPC） | 用途 |
-|---|---|---|---|
-| `tiny`   | 約34万  | 約1分   | 動作確認 |
-| `small`  | 約250万 | 約1時間 | 標準 |
-| `medium` | 約710万 | 約6時間 | 一晩かけて |
+| プリセット | パラメータ数 | 学習時間の目安: CPU | GPU（RTX 5070 Ti） | 用途 |
+|---|---|---|---|---|
+| `tiny`   | 約34万  | 約1分   | 約10秒 | 動作確認 |
+| `small`  | 約250万 | 約1時間 | 約2分  | 標準 |
+| `medium` | 約710万 | 約6時間 | 約8分  | CPU なら一晩かけて |
+
+学習の最初に「計算に使う装置: GPU（…）」のように、CPU と GPU のどちらで計算しているかが表示されます。
 
 学習中は、損失（小さいほど良い）と、評価のたびに「吾輩は」から書かせた生成例が表示されます。
 だんだん文章らしくなっていく様子を見られます。
@@ -77,6 +95,7 @@ uv run python train.py                 # 本番（small、約1時間）
 - `Ctrl+C` で中断しても状態は保存されます。`uv run python train.py --resume` で続きから再開できます
 - モデルは `checkpoints/<プリセット名>/` に保存されます
 - `--n-layer 6 --n-embd 256` のように個別に設定を変えることもできます（`--help` で一覧）
+- GPU で学習したモデルも、CPU で生成・再開できます（逆も同じ）
 
 ### 4. 文章を生成（text to text）
 
@@ -125,6 +144,7 @@ uv run python generate.py --author 太宰治
 | [numneuron/tokenizer.py](numneuron/tokenizer.py) | 文字 ⇔ ID の変換 |
 | [numneuron/aozora.py](numneuron/aozora.py) | 青空文庫の書式から本文だけを取り出す |
 | [numneuron/checkpoint.py](numneuron/checkpoint.py) | モデルの保存と読み込み |
+| [numneuron/backend.py](numneuron/backend.py) | CPU（NumPy）と GPU（CuPy）の切り替え |
 | [tests/](tests/) | テスト。手書きの逆伝播が正しいかを数値微分で確かめる「勾配確認」など |
 
 読む順番のおすすめ: `layers.py`（Linear → LayerNorm → CausalSelfAttention）→ `model.py` → `train.py`。
